@@ -1,0 +1,319 @@
+#! /bin/env python
+from mpl_toolkits.basemap import Basemap
+
+__author__ = 'huziy'
+
+import numpy as np
+
+
+EARTH_RADIUS_METERS = 6371000.0
+
+Grd_ni_name = "Grd_ni"
+Grd_nj_name = "Grd_nj"
+Grd_dx_name = "Grd_dx"
+Grd_dy_name = "Grd_dy"
+Grd_iref_name = "Grd_iref"
+Grd_jref_name = "Grd_jref"
+Grd_latr_name = "Grd_latr"
+Grd_lonr_name = "Grd_lonr"
+Grd_xlat1_name = "Grd_xlat1"
+Grd_xlat2_name = "Grd_xlat2"
+Grd_xlon1_name = "Grd_xlon1"
+Grd_xlon2_name = "Grd_xlon2"
+
+not_relevent_params = [
+    "Grd_typ_S"
+]
+
+import matplotlib.pyplot as plt
+
+def _parse_parameters(path):
+    #parse config file
+    result = {}
+    with open(path) as f:
+        lines = f.readlines()
+
+        select_in_progress = False
+        for line in lines:
+            line = line.strip()
+
+            #skip empty lines
+            if line == "":
+                continue
+
+
+            if select_in_progress and line.endswith("/"):
+                break
+
+            #parse the values of the parameters
+            if select_in_progress:
+                fields = line.split(",")
+                print(line)
+                for the_field in fields:
+                    #skip fields that do not contain "="
+                    if "=" not in the_field:
+                        continue
+
+                    name, value = [f.strip() for f in the_field.split("=")]
+                    if name in [Grd_ni_name, Grd_nj_name, Grd_iref_name, Grd_jref_name]:
+                        result[name] = int(value)
+                    elif name in not_relevent_params:
+                        continue
+                    else:
+                        result[name] = float(value)
+
+            if line.startswith("&grid"):
+                select_in_progress = True
+
+
+    return result
+
+
+
+def main(path = "gemclim_settings.nml"):
+    params = _parse_parameters(path)
+    print(params)
+
+    ni, nj = params[Grd_ni_name], params[Grd_nj_name]
+    dx, dy = params[Grd_dx_name], params[Grd_dy_name]
+    iRef, jRef = params[Grd_iref_name] - 1, params[Grd_jref_name] - 1
+    lonRef, latRef = params[Grd_lonr_name], params[Grd_latr_name]
+
+    lon1, lat1 = params[Grd_xlon1_name], params[Grd_xlat1_name]
+    lon2, lat2 = params[Grd_xlon2_name], params[Grd_xlat2_name]
+
+
+    lons_rot = np.arange(lonRef + (0 - iRef) * dx, lonRef + (ni - iRef) * dx, dx)
+    lats_rot = np.arange(latRef + (0 - jRef) * dy, latRef + (nj - jRef) * dy, dy)
+
+    lats_rot, lons_rot = np.meshgrid(lats_rot, lons_rot)
+    print(lats_rot.shape)
+    lons_rot[lons_rot > 180] -= 360
+
+    rll = RotatedLatLon(lon1=lon1, lat1=lat1, lon2=lon2, lat2=lat2)
+
+    truepole_lonr, truepole_latr = rll.get_true_pole_coords_in_rotated_system()
+    rotpole_lon, rotpole_lat = rll.get_north_pole_coords()
+
+    llcrnrlon, llcrnrlat = rll.toGeographicLonLat(lons_rot[0,0], lats_rot[0,0])
+    urcrnrlon, urcrnrlat = rll.toGeographicLonLat(lons_rot[-1,-1], lats_rot[-1,-1])
+  
+    #llcrnrlon = llcrnrlon - 360 if llcrnrlon > 180 else llcrnrlon
+    #urcrnrlon = urcrnrlon - 360 if urcrnrlon > 180 else urcrnrlon
+
+
+    #plot the domain
+    plt.figure(figsize = (10, 10)) 
+    
+    
+    
+    b = Basemap(projection = "rotpole", lon_0 = truepole_lonr - 180, o_lat_p = rotpole_lat, o_lon_p = rotpole_lon,
+        llcrnrlon=llcrnrlon, llcrnrlat=llcrnrlat, urcrnrlon=urcrnrlon, urcrnrlat=urcrnrlat, resolution="i")
+
+    print(dict(projection = "rotpole", lon_0 = truepole_lonr - 180, o_lat_p = rotpole_lat, o_lon_p = rotpole_lon,
+        llcrnrlon=llcrnrlon, llcrnrlat=llcrnrlat, urcrnrlon=urcrnrlon, urcrnrlat=urcrnrlat, resolution="i"))
+
+    b.drawmeridians(np.arange(-180, 180, 20))
+    b.drawparallels(np.arange(-90, 90, 20))
+    print(lons_rot[0,0], lats_rot[0,0], lons_rot[-1, -1], lats_rot[-1, -1])
+    #b.contourf(lons_rot, lats_rot, lons_rot)
+    #b.colorbar()
+    #b.shadedrelief()
+    b.drawcoastlines()
+    #b.drawmeridians(np.arange(160, 200, 10))
+    #plt.show()
+    plt.savefig(os.path.basename(path) + ".png")
+
+
+
+
+
+class RotatedLatLon():
+
+
+    def __init__(self, lon1 = 180, lat1 = 0, lon2 = 180, lat2 = 0):
+        """
+        Basis vactors of the rotated coordinate system in the original coord system
+        e1 = -p1/|p1|                   =>   row0
+        e2 = -( p2 - (p1, p2) * p1) / |p2 - (p1, p2) * p1| #perpendicular to e1, and lies in
+        the plane parallel to the plane (p1^p2)  => row1
+        e3 = [p1,p2] / |[p1, p2]| , perpendicular to the plane (p1^p2)          => row2
+        """
+
+        self.lon1 = lon1
+        self.lon2 = lon2
+        self.lat1 = lat1
+        self.lat2 = lat2
+
+        self.mean_earth_radius_m_crcm5 = 0.637122e7 # mean earth radius used in the CRCM5 model for area calculation
+
+        p1 = lon_lat_to_cartesian(lon1, lat1, R = 1.0)
+        p2 = lon_lat_to_cartesian(lon2, lat2, R = 1.0)
+
+        p1 = np.array(p1)
+        p2 = np.array(p2)
+
+        cross_prod = np.cross(p1, p2)
+        dot_prod = np.dot(p1, p2)
+
+        row0 = -np.array(p1) / np.sqrt(np.dot( p1, p1 ))
+        e2 = (dot_prod * p1 - p2)
+        row1 = e2 / np.sqrt(np.dot( e2, e2 ))
+        row2 = cross_prod / np.sqrt( np.dot(cross_prod, cross_prod) )
+        self.rot_matrix = np.matrix( [row0, row1, row2] )
+        assert isinstance(self.rot_matrix, np.matrix)
+        pass
+
+
+    def write_coords_to_rpn(self, rpnObj, x, y):
+        """
+        x, y - 1d coordinates in rotated system
+        """
+        x = np.array(x)
+        x.shape = (len(x),1)
+        y = np.array(y)
+        y.shape = (1, len(y)) 
+
+        rpnObj.write_2D_field(name="^^", grid_type="E", data=y, typ_var="X", level = 0, ip = range(100,103),
+            lon1=self.lon1, lat1 = self.lat1, lon2 = self.lon2, lat2 = self.lat2, label="")
+
+        rpnObj.write_2D_field(name=">>", grid_type="E", data=x, typ_var="X", level = 0, ip = range(100, 103),
+            lon1=self.lon1, lat1 = self.lat1, lon2 = self.lon2, lat2 = self.lat2, label = "")
+
+        info = rpnObj.get_current_info
+        ip_xy = map(lambda x: x.value, info["ip"])
+        ig = ip_xy + [0]
+        return ig
+
+
+
+    def toProjectionXY(self, lon, lat):
+        """
+        Convert geographic lon/lat coordinates to the rotated lat lon coordinates
+        """
+
+        p = lon_lat_to_cartesian(lon, lat, R = 1)
+        p = self.rot_matrix * np.mat(p).T
+        return cartesian_to_lon_lat(p.A1)
+
+
+    def toGeographicLonLat(self, x, y):
+        """
+        convert geographic lat / lon to rotated coordinates
+        """
+        p = lon_lat_to_cartesian(x, y, R = 1)
+        p = self.rot_matrix.T * np.mat( p ).T
+
+        return cartesian_to_lon_lat(p.A1)
+
+        pass
+
+    def get_areas_of_gridcells(self, dlon, dlat, nx, ny, latref, jref):
+
+        """
+        dlon, dlat, lonref, latref - are in degrees
+        iref and jref are counted starting from 1, put here direct values grom gemclim_settings.nml
+        """
+        dx = np.radians(dlon)
+        dy = np.radians(dlat)
+
+        latref_rad = np.radians(latref)
+
+        lats2d = np.zeros((nx, ny))
+        for j in range(ny):
+            lat = latref_rad + (j - jref + 1) * dy
+            lats2d[:,j] = lat
+
+        return self.mean_earth_radius_m_crcm5 ** 2 * np.cos(lats2d) * dx * dy
+
+
+    def get_south_pol_coords(self):
+        rot_pole = self.rot_matrix * np.mat([0,0,-1]).T
+        return cartesian_to_lon_lat(rot_pole.A1)
+        pass
+
+
+    def get_north_pole_coords(self):
+        """
+        get true coordinates of the rotated north pole
+        """
+        rot_pole = self.rot_matrix * np.mat([0,0,1]).T
+        return cartesian_to_lon_lat(rot_pole.A1)
+
+
+    def get_true_pole_coords_in_rotated_system(self):
+        """
+        needed for lon_0 in basemap
+        """
+        rot_pole = self.rot_matrix.T * np.mat([0,0,1]).T
+        return cartesian_to_lon_lat(rot_pole.A1)
+
+
+def cartesian_to_lon_lat(x):
+    """
+     x - vector with coordinates [x1, y1, z1]
+     returns [lon, lat]
+    """
+
+    lon = np.arctan2(x[1], x[0])
+    lon = np.degrees(lon)
+    lat = np.arcsin(x[2]/ (np.dot(x, x)) ** 0.5)
+    lat = np.degrees(lat)
+    return lon, lat
+
+
+#longitude and latitude are in radians
+def get_nvector(rad_lon, rad_lat):
+    return [ np.cos(rad_lat) * np.cos(rad_lon), np.cos(rad_lat) * np.sin(rad_lon), np.sin(rad_lat) ]
+
+
+#p1 and p2 are geopoint objects
+def get_distance_in_meters(*arg):
+    """
+    arg = point1, point2
+    arg = lon1, lat1, lon2, lat2
+    """
+    if len(arg) == 2: #if we have 2 geopoints as an argument
+        [p1, p2] = arg
+        n1 = p1.get_nvector()
+        n2 = p2.get_nvector()
+    elif len(arg) == 4: #if we have the coordinates of two points in degrees
+        print(arg)
+        x = np.radians(arg)
+        n1 = get_nvector(x[0], x[1])
+        n2 = get_nvector(x[2], x[3])
+    else:
+        raise Exception("get_distance_in_meters should be 2 or 4 parameters.")
+    return EARTH_RADIUS_METERS * get_angle_between_vectors(n1, n2)
+
+
+def get_angle_between_vectors(n1, n2):
+    dy = np.cross(n1, n2)
+    dy = np.dot(dy, dy) ** 0.5
+    dx = np.dot(n1, n2)
+    return atan2(dy, dx)
+
+
+def lon_lat_to_cartesian(lon, lat, R = EARTH_RADIUS_METERS):
+    """
+    calculates x,y,z coordinates of a point on a sphere with
+    radius R = EARTH_RADIUS_METERS
+    """
+    lon_r = np.radians(lon)
+    lat_r = np.radians(lat)
+
+    x =  R * np.cos(lat_r) * np.cos(lon_r)
+    y = R * np.cos(lat_r) * np.sin(lon_r)
+    z = R * np.sin(lat_r)
+    return x,y,z
+
+
+
+
+if __name__ == "__main__":
+    import sys
+    import os
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        main(path=sys.argv[1])
+    else:
+        main()
